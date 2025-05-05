@@ -3,7 +3,10 @@ use alloy_transport::{BoxTransport, TransportConnect, TransportError, TransportE
 use std::str::FromStr;
 
 #[cfg(any(feature = "ws", feature = "ipc"))]
-use alloy_pubsub::{PubSubConnect, RetryConfig};
+use alloy_pubsub::PubSubConnect;
+
+#[cfg(feature = "ws")]
+use alloy_pubsub::RetryConfig;
 
 /// Connection string for built-in transports.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,24 +81,21 @@ impl BuiltInConnectionString {
             )),
 
             #[cfg(all(not(target_family = "wasm"), feature = "ws"))]
-            Self::Ws { url, auth, retry_config } => {
-                let mut connector = alloy_transport_ws::WsConnect::new(url.clone());
-
-                // Apply authentication if available
-                if let Some(auth) = auth {
-                    #[cfg(not(target_family = "wasm"))]
-                    {
-                        connector = connector.with_auth(auth.clone());
-                    }
-                }
-
-                // Apply retry configuration if available
-                if let Some(config) = retry_config {
-                    connector = connector.with_retry_config(*config);
-                }
-
-                connector.into_service().await.map(alloy_transport::Transport::boxed)
+            Self::Ws { url, auth: Some(auth), retry_config } => {
+                alloy_transport_ws::WsConnect::new(url.clone())
+                    .with_auth(auth.clone())
+                    .with_retry_config(retry_config.unwrap_or_default())
+                    .into_service()
+                    .await
+                    .map(alloy_transport::Transport::boxed)
             }
+
+            #[cfg(feature = "ws")]
+            Self::Ws { url, retry_config, .. } => alloy_transport_ws::WsConnect::new(url.clone())
+                .with_retry_config(retry_config.unwrap_or_default())
+                .into_service()
+                .await
+                .map(alloy_transport::Transport::boxed),
 
             #[cfg(feature = "ipc")]
             Self::Ipc(path) => alloy_transport_ipc::IpcConnect::new(path.to_owned())
