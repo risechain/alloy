@@ -3,7 +3,7 @@ use alloy_transport::{BoxTransport, TransportConnect, TransportError, TransportE
 use std::str::FromStr;
 
 #[cfg(any(feature = "ws", feature = "ipc"))]
-use alloy_pubsub::PubSubConnect;
+use alloy_pubsub::{PubSubConnect, RetryConfig};
 
 /// Connection string for built-in transports.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,7 +14,14 @@ pub enum BuiltInConnectionString {
     Http(url::Url),
     /// WebSocket transport.
     #[cfg(feature = "ws")]
-    Ws(url::Url, Option<alloy_transport::Authorization>, Option<u32>, Option<std::time::Duration>),
+    Ws {
+        /// The URL to connect to.
+        url: url::Url,
+        /// The optional authorization header to use.
+        auth: Option<alloy_transport::Authorization>,
+        /// Optional configuration for retry behavior.
+        retry_config: Option<RetryConfig>,
+    },
     /// IPC transport.
     #[cfg(feature = "ipc")]
     Ipc(std::path::PathBuf),
@@ -26,7 +33,7 @@ impl TransportConnect for BuiltInConnectionString {
             #[cfg(any(feature = "reqwest", feature = "hyper"))]
             Self::Http(url) => alloy_transport::utils::guess_local_url(url),
             #[cfg(feature = "ws")]
-            Self::Ws(url, _, _, _) => alloy_transport::utils::guess_local_url(url),
+            Self::Ws { url, .. } => alloy_transport::utils::guess_local_url(url),
             #[cfg(feature = "ipc")]
             Self::Ipc(_) => true,
             #[cfg(not(any(
@@ -71,31 +78,20 @@ impl BuiltInConnectionString {
             )),
 
             #[cfg(all(not(target_family = "wasm"), feature = "ws"))]
-            Self::Ws(url, Some(auth), max_retries, retry_interval) => {
-                let mut connector =
-                    alloy_transport_ws::WsConnect::new(url.clone()).with_auth(auth.clone());
-
-                if let Some(retries) = max_retries {
-                    connector = connector.with_max_retries(*retries);
-                }
-
-                if let Some(interval) = retry_interval {
-                    connector = connector.with_retry_interval(*interval);
-                }
-
-                connector.into_service().await.map(alloy_transport::Transport::boxed)
-            }
-
-            #[cfg(feature = "ws")]
-            Self::Ws(url, _, max_retries, retry_interval) => {
+            Self::Ws { url, auth, retry_config } => {
                 let mut connector = alloy_transport_ws::WsConnect::new(url.clone());
 
-                if let Some(retries) = max_retries {
-                    connector = connector.with_max_retries(*retries);
+                // Apply authentication if available
+                if let Some(auth) = auth {
+                    #[cfg(not(target_family = "wasm"))]
+                    {
+                        connector = connector.with_auth(auth.clone());
+                    }
                 }
 
-                if let Some(interval) = retry_interval {
-                    connector = connector.with_retry_interval(*interval);
+                // Apply retry configuration if available
+                if let Some(config) = retry_config {
+                    connector = connector.with_retry_config(*config);
                 }
 
                 connector.into_service().await.map(alloy_transport::Transport::boxed)
@@ -158,7 +154,7 @@ impl BuiltInConnectionString {
 
         let auth = alloy_transport::Authorization::extract_from_url(&url);
 
-        Ok(Self::Ws(url, auth, None, None))
+        Ok(Self::Ws { url, auth, retry_config: None })
     }
 
     /// Tries to parse the given string as an IPC path, returning an error if
@@ -177,48 +173,11 @@ impl BuiltInConnectionString {
         Ok(Self::Ipc(path.to_path_buf()))
     }
 
-    /// Sets the max number of retries before failing and exiting the WebSocket connection.
-    /// Default is 10.
-    ///
-    /// This has no effect on HTTP or IPC connections.
+    /// Replace the retry_config with a new one
     #[cfg(feature = "ws")]
-    pub fn with_max_retries(self, max_retries: u32) -> Self {
+    pub fn with_retry_config(self, config: RetryConfig) -> Self {
         match self {
-            Self::Ws(url, auth, _, retry_interval) => {
-                Self::Ws(url, auth, Some(max_retries), retry_interval)
-            }
-            _ => self,
-        }
-    }
-
-    /// Sets the interval between retries for WebSocket connections.
-    /// Default is 3 seconds.
-    ///
-    /// This has no effect on HTTP or IPC connections.
-    #[cfg(feature = "ws")]
-    pub fn with_retry_interval(self, retry_interval: std::time::Duration) -> Self {
-        match self {
-            Self::Ws(url, auth, max_retries, _) => {
-                Self::Ws(url, auth, max_retries, Some(retry_interval))
-            }
-            _ => self,
-        }
-    }
-
-    /// Sets both the max number of retries and retry interval for WebSocket connections.
-    /// Default max_retries is 10, and default retry_interval is 3 seconds.
-    ///
-    /// This has no effect on HTTP or IPC connections.
-    #[cfg(feature = "ws")]
-    pub fn with_retry_settings(
-        self,
-        max_retries: u32,
-        retry_interval: std::time::Duration,
-    ) -> Self {
-        match self {
-            Self::Ws(url, auth, _, _) => {
-                Self::Ws(url, auth, Some(max_retries), Some(retry_interval))
-            }
+            Self::Ws { url, auth, .. } => Self::Ws { url, auth, retry_config: Some(config) },
             _ => self,
         }
     }
@@ -292,40 +251,36 @@ mod test {
 
         assert_eq!(
             BuiltInConnectionString::from_str("ws://localhost:8545").unwrap(),
-            BuiltInConnectionString::Ws(
-                "ws://localhost:8545".parse::<Url>().unwrap(),
-                None,
-                None,
-                None
-            )
+            BuiltInConnectionString::Ws {
+                url: "ws://localhost:8545".parse::<Url>().unwrap(),
+                auth: None,
+                retry_config: None,
+            }
         );
         assert_eq!(
             BuiltInConnectionString::from_str("wss://localhost:8545").unwrap(),
-            BuiltInConnectionString::Ws(
-                "wss://localhost:8545".parse::<Url>().unwrap(),
-                None,
-                None,
-                None
-            )
+            BuiltInConnectionString::Ws {
+                url: "wss://localhost:8545".parse::<Url>().unwrap(),
+                auth: None,
+                retry_config: None,
+            }
         );
         assert_eq!(
             BuiltInConnectionString::from_str("ws://127.0.0.1:8545").unwrap(),
-            BuiltInConnectionString::Ws(
-                "ws://127.0.0.1:8545".parse::<Url>().unwrap(),
-                None,
-                None,
-                None
-            )
+            BuiltInConnectionString::Ws {
+                url: "ws://127.0.0.1:8545".parse::<Url>().unwrap(),
+                auth: None,
+                retry_config: None,
+            }
         );
 
         assert_eq!(
             BuiltInConnectionString::from_str("ws://alice:pass@127.0.0.1:8545").unwrap(),
-            BuiltInConnectionString::Ws(
-                "ws://alice:pass@127.0.0.1:8545".parse::<Url>().unwrap(),
-                Some(Authorization::basic("alice", "pass")),
-                None,
-                None
-            )
+            BuiltInConnectionString::Ws {
+                url: "ws://alice:pass@127.0.0.1:8545".parse::<Url>().unwrap(),
+                auth: Some(Authorization::basic("alice", "pass")),
+                retry_config: None,
+            }
         );
     }
 
@@ -367,61 +322,24 @@ mod test {
         let ws_string = BuiltInConnectionString::from_str("ws://localhost:8545").unwrap();
         assert_eq!(
             ws_string,
-            BuiltInConnectionString::Ws(
-                "ws://localhost:8545".parse::<url::Url>().unwrap(),
-                None,
-                None,
-                None
-            )
+            BuiltInConnectionString::Ws {
+                url: "ws://localhost:8545".parse::<Url>().unwrap(),
+                auth: None,
+                retry_config: None,
+            }
         );
 
-        // Set custom max retries
-        let ws_with_retries = ws_string.clone().with_max_retries(20);
-        assert_eq!(
-            ws_with_retries,
-            BuiltInConnectionString::Ws(
-                "ws://localhost:8545".parse::<url::Url>().unwrap(),
-                None,
-                Some(20),
-                None
-            )
-        );
+        // Test with custom RetryConfig
+        let custom_config = RetryConfig { max_retries: 25, retry_interval: Duration::from_secs(7) };
+        let ws_with_config = ws_string.with_retry_config(custom_config.clone());
 
-        // Set custom retry interval
-        let ws_with_interval = ws_string.clone().with_retry_interval(Duration::from_secs(5));
         assert_eq!(
-            ws_with_interval,
-            BuiltInConnectionString::Ws(
-                "ws://localhost:8545".parse::<url::Url>().unwrap(),
-                None,
-                None,
-                Some(Duration::from_secs(5))
-            )
-        );
-
-        // Set both using the individual functions
-        let ws_with_both =
-            ws_string.clone().with_max_retries(20).with_retry_interval(Duration::from_secs(5));
-        assert_eq!(
-            ws_with_both,
-            BuiltInConnectionString::Ws(
-                "ws://localhost:8545".parse::<url::Url>().unwrap(),
-                None,
-                Some(20),
-                Some(Duration::from_secs(5))
-            )
-        );
-
-        // Set both using the combined function
-        let ws_with_combined = ws_string.with_retry_settings(15, Duration::from_secs(10));
-        assert_eq!(
-            ws_with_combined,
-            BuiltInConnectionString::Ws(
-                "ws://localhost:8545".parse::<url::Url>().unwrap(),
-                None,
-                Some(15),
-                Some(Duration::from_secs(10))
-            )
+            ws_with_config,
+            BuiltInConnectionString::Ws {
+                url: "ws://localhost:8545".parse::<Url>().unwrap(),
+                auth: None,
+                retry_config: Some(custom_config),
+            }
         );
     }
 }

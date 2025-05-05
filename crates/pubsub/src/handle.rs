@@ -1,11 +1,8 @@
 use alloy_json_rpc::PubSubItem;
 use serde_json::value::RawValue;
-use tokio::{
-    sync::{
-        mpsc,
-        oneshot::{self, error::TryRecvError},
-    },
-    time::Duration,
+use tokio::sync::{
+    mpsc,
+    oneshot::{self, error::TryRecvError},
 };
 
 /// A handle to a backend. Communicates to a `ConnectionInterface` on the
@@ -27,12 +24,8 @@ pub struct ConnectionHandle {
     /// Notify the backend of intentional shutdown.
     pub(crate) shutdown: oneshot::Sender<()>,
 
-    /// Max number of retries before failing and exiting the connection.
-    /// Default is 10.
-    pub(crate) max_retries: u32,
-    /// The interval between retries.
-    /// Default is 3 seconds.
-    pub(crate) retry_interval: Duration,
+    /// The retry config.
+    pub(crate) retry_config: RetryConfig,
 }
 
 impl ConnectionHandle {
@@ -48,8 +41,7 @@ impl ConnectionHandle {
             from_socket,
             error: error_rx,
             shutdown: shutdown_tx,
-            max_retries: 10,
-            retry_interval: Duration::from_secs(3),
+            retry_config: RetryConfig::default(),
         };
         let interface = ConnectionInterface {
             from_frontend,
@@ -60,16 +52,9 @@ impl ConnectionHandle {
         (handle, interface)
     }
 
-    /// Set the max number of retries before failing and exiting the connection.
-    /// Default is 10.
-    pub fn with_max_retries(mut self, max_retries: u32) -> Self {
-        self.max_retries = max_retries;
-        self
-    }
-
-    /// Set the interval between retries.
-    pub fn with_retry_interval(mut self, retry_interval: Duration) -> Self {
-        self.retry_interval = retry_interval;
+    /// Set the retry config.
+    pub fn with_retry_config(mut self, retry_config: RetryConfig) -> Self {
+        self.retry_config = retry_config;
         self
     }
 
@@ -123,5 +108,20 @@ impl ConnectionInterface {
     /// Close the interface, sending an error to the frontend.
     pub fn close_with_error(self) {
         let _ = self.error.send(());
+    }
+}
+
+/// Configuration for retry behavior in WebSocket connections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetryConfig {
+    /// Max number of retries before failing and exiting the connection.
+    pub max_retries: u32,
+    /// The interval between retries.
+    pub retry_interval: std::time::Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self { max_retries: 10, retry_interval: std::time::Duration::from_secs(3) }
     }
 }

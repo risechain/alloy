@@ -198,8 +198,8 @@ impl<T: PubSubConnect> PubSubService<T> {
     /// Attempt to reconnect with retries
     async fn reconnect_with_retries(&mut self) -> TransportResult<()> {
         let mut retry_count = 0;
-        let max_retries = self.handle.max_retries;
-        let interval = self.handle.retry_interval;
+        let max_retries = self.handle.retry_config.max_retries;
+        let interval = self.handle.retry_config.retry_interval;
         loop {
             match self.reconnect().await {
                 Ok(()) => break Ok(()),

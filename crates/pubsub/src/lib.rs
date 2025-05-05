@@ -19,7 +19,7 @@ mod ix;
 pub use ix::PubSubInstruction;
 
 mod handle;
-pub use handle::{ConnectionHandle, ConnectionInterface};
+pub use handle::{ConnectionHandle, ConnectionInterface, RetryConfig};
 
 mod managers;
 pub use managers::InFlight;
